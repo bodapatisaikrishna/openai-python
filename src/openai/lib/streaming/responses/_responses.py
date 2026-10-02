@@ -352,15 +352,25 @@ class ResponseStreamState(Generic[TextFormatT]):
         elif event.type == "response.content_part.added":
             output = self._get_output_item(event.output_index)
             if output.type == "message":
-                output.content.append(
-                    construct_type_unchecked(type_=cast(Any, ParsedContent), value=event.part.to_dict())
-                )
+                part = construct_type_unchecked(type_=cast(Any, ParsedContent), value=event.part.to_dict())
+                self._ensure_content_part(output, event.content_index, part=part)
+        elif event.type == "response.content_part.done":
+            output = self._get_output_item(event.output_index)
+            if output.type == "message":
+                part = construct_type_unchecked(type_=cast(Any, ParsedContent), value=event.part.to_dict())
+                self._ensure_content_part(output, event.content_index, part=part)
         elif event.type == "response.output_text.delta":
             output = self._get_output_item(event.output_index)
             if output.type == "message":
-                content = output.content[event.content_index]
-                assert content.type == "output_text"
-                content.text += event.delta
+                content = self._ensure_content_part(output, event.content_index)
+                if content.type == "output_text":
+                    content.text += event.delta
+        elif event.type == "response.output_text.done":
+            output = self._get_output_item(event.output_index)
+            if output.type == "message":
+                content = self._ensure_content_part(output, event.content_index)
+                if content.type == "output_text":
+                    content.text = event.text
         elif event.type == "response.function_call_arguments.delta":
             output = self._get_output_item(event.output_index)
             if output.type == "function_call":
@@ -380,6 +390,43 @@ class ResponseStreamState(Generic[TextFormatT]):
             )
 
         return snapshot
+
+    def _ensure_content_part(
+        self,
+        output: ParsedResponseOutputMessage[object],
+        content_index: int,
+        part: ParsedContent | None = None,
+    ) -> ParsedContent:
+        while len(output.content) < content_index:
+            output.content.append(
+                construct_type_unchecked(
+                    type_=cast(Any, ParsedContent),
+                    value={"type": "output_text", "text": "", "annotations": [], "logprobs": []},
+                )
+            )
+        if len(output.content) == content_index:
+            new_part = (
+                part
+                if part is not None
+                else construct_type_unchecked(
+                    type_=cast(Any, ParsedContent),
+                    value={"type": "output_text", "text": "", "annotations": [], "logprobs": []},
+                )
+            )
+            output.content.append(new_part)
+            return new_part
+        if part is not None:
+            output.content[content_index] = part
+            return part
+        existing = output.content[content_index]
+        if existing.type != "output_text":
+            text_part = construct_type_unchecked(
+                type_=cast(Any, ParsedContent),
+                value={"type": "output_text", "text": "", "annotations": [], "logprobs": []},
+            )
+            output.content[content_index] = text_part
+            return text_part
+        return existing
 
     def _get_output_item(self, output_index: int) -> ParsedResponseOutputItem[object]:
         try:

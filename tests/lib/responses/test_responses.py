@@ -10,7 +10,15 @@ from tests.respx2 import MockRouter
 from openai._types import omit
 from openai._utils import assert_signatures_in_sync
 from openai._models import construct_type_unchecked
-from openai.types.responses import Response, ResponseCreatedEvent, ResponseOutputItemAddedEvent
+from openai.types.responses import (
+    Response,
+    ResponseCreatedEvent,
+    ResponseTextDoneEvent,
+    ResponseTextDeltaEvent,
+    ResponseOutputItemAddedEvent,
+    ResponseContentPartAddedEvent,
+    ResponseFunctionCallArgumentsDeltaEvent,
+)
 from openai.lib._parsing._responses import parse_response
 from openai.lib.streaming.responses._responses import ResponseStreamState
 
@@ -207,3 +215,334 @@ def test_stream_state_ignores_output_item_added_with_null_item() -> None:
 
     assert events == [added]
     assert state.accumulate_event(added).output == []
+
+
+def test_stream_state_handles_gapped_content_index() -> None:
+    state: ResponseStreamState[object] = ResponseStreamState(text_format=omit, input_tools=[])
+
+    created = construct_type_unchecked(
+        type_=ResponseCreatedEvent,
+        value={
+            "type": "response.created",
+            "sequence_number": 0,
+            "response": {
+                "id": "resp_123",
+                "object": "response",
+                "created_at": 0,
+                "status": "in_progress",
+                "background": False,
+                "error": None,
+                "incomplete_details": None,
+                "instructions": None,
+                "max_output_tokens": None,
+                "max_tool_calls": None,
+                "model": "gpt-5-nano",
+                "output": [],
+                "parallel_tool_calls": True,
+                "previous_response_id": None,
+                "prompt_cache_key": None,
+                "reasoning": {"effort": None, "summary": None},
+                "safety_identifier": None,
+                "service_tier": "default",
+                "store": True,
+                "temperature": 1.0,
+                "text": {"format": {"type": "text"}, "verbosity": "medium"},
+                "tool_choice": "auto",
+                "tools": [],
+                "top_logprobs": 0,
+                "top_p": 1.0,
+                "truncation": "disabled",
+                "usage": None,
+                "user": None,
+                "metadata": {},
+            },
+        },
+    )
+    state.handle_event(created)
+
+    added = construct_type_unchecked(
+        type_=ResponseOutputItemAddedEvent,
+        value={
+            "type": "response.output_item.added",
+            "sequence_number": 1,
+            "output_index": 0,
+            "item": {
+                "id": "msg_123",
+                "type": "message",
+                "status": "in_progress",
+                "role": "assistant",
+                "content": [],
+            },
+        },
+    )
+    state.handle_event(added)
+
+    part_added = construct_type_unchecked(
+        type_=ResponseContentPartAddedEvent,
+        value={
+            "type": "response.content_part.added",
+            "sequence_number": 2,
+            "output_index": 0,
+            "content_index": 1,
+            "item_id": "msg_123",
+            "part": {
+                "type": "output_text",
+                "text": "",
+                "annotations": [],
+                "logprobs": [],
+            },
+        },
+    )
+    state.handle_event(part_added)
+
+    delta = construct_type_unchecked(
+        type_=ResponseTextDeltaEvent,
+        value={
+            "type": "response.output_text.delta",
+            "sequence_number": 3,
+            "output_index": 0,
+            "content_index": 1,
+            "item_id": "msg_123",
+            "delta": "Hello world",
+            "logprobs": [],
+        },
+    )
+    events = state.handle_event(delta)
+    assert len(events) == 1
+    assert events[0].type == "response.output_text.delta"
+    assert events[0].snapshot == "Hello world"
+    assert events[0].content_index == 1
+
+
+def test_stream_state_handles_delta_without_prior_content_part_added() -> None:
+    state: ResponseStreamState[object] = ResponseStreamState(text_format=omit, input_tools=[])
+
+    created = construct_type_unchecked(
+        type_=ResponseCreatedEvent,
+        value={
+            "type": "response.created",
+            "sequence_number": 0,
+            "response": {
+                "id": "resp_123",
+                "object": "response",
+                "created_at": 0,
+                "status": "in_progress",
+                "background": False,
+                "error": None,
+                "incomplete_details": None,
+                "instructions": None,
+                "max_output_tokens": None,
+                "max_tool_calls": None,
+                "model": "gpt-5-nano",
+                "output": [],
+                "parallel_tool_calls": True,
+                "previous_response_id": None,
+                "prompt_cache_key": None,
+                "reasoning": {"effort": None, "summary": None},
+                "safety_identifier": None,
+                "service_tier": "default",
+                "store": True,
+                "temperature": 1.0,
+                "text": {"format": {"type": "text"}, "verbosity": "medium"},
+                "tool_choice": "auto",
+                "tools": [],
+                "top_logprobs": 0,
+                "top_p": 1.0,
+                "truncation": "disabled",
+                "usage": None,
+                "user": None,
+                "metadata": {},
+            },
+        },
+    )
+    state.handle_event(created)
+
+    added = construct_type_unchecked(
+        type_=ResponseOutputItemAddedEvent,
+        value={
+            "type": "response.output_item.added",
+            "sequence_number": 1,
+            "output_index": 0,
+            "item": {
+                "id": "msg_123",
+                "type": "message",
+                "status": "in_progress",
+                "role": "assistant",
+                "content": [],
+            },
+        },
+    )
+    state.handle_event(added)
+
+    delta = construct_type_unchecked(
+        type_=ResponseTextDeltaEvent,
+        value={
+            "type": "response.output_text.delta",
+            "sequence_number": 2,
+            "output_index": 0,
+            "content_index": 0,
+            "item_id": "msg_123",
+            "delta": "Resumed text",
+            "logprobs": [],
+        },
+    )
+    events = state.handle_event(delta)
+    assert len(events) == 1
+    assert events[0].type == "response.output_text.delta"
+    assert events[0].snapshot == "Resumed text"
+
+
+def test_stream_state_handles_text_done_with_gapped_index() -> None:
+    state: ResponseStreamState[object] = ResponseStreamState(text_format=omit, input_tools=[])
+
+    created = construct_type_unchecked(
+        type_=ResponseCreatedEvent,
+        value={
+            "type": "response.created",
+            "sequence_number": 0,
+            "response": {
+                "id": "resp_123",
+                "object": "response",
+                "created_at": 0,
+                "status": "in_progress",
+                "background": False,
+                "error": None,
+                "incomplete_details": None,
+                "instructions": None,
+                "max_output_tokens": None,
+                "max_tool_calls": None,
+                "model": "gpt-5-nano",
+                "output": [],
+                "parallel_tool_calls": True,
+                "previous_response_id": None,
+                "prompt_cache_key": None,
+                "reasoning": {"effort": None, "summary": None},
+                "safety_identifier": None,
+                "service_tier": "default",
+                "store": True,
+                "temperature": 1.0,
+                "text": {"format": {"type": "text"}, "verbosity": "medium"},
+                "tool_choice": "auto",
+                "tools": [],
+                "top_logprobs": 0,
+                "top_p": 1.0,
+                "truncation": "disabled",
+                "usage": None,
+                "user": None,
+                "metadata": {},
+            },
+        },
+    )
+    state.handle_event(created)
+
+    added = construct_type_unchecked(
+        type_=ResponseOutputItemAddedEvent,
+        value={
+            "type": "response.output_item.added",
+            "sequence_number": 1,
+            "output_index": 0,
+            "item": {
+                "id": "msg_123",
+                "type": "message",
+                "status": "in_progress",
+                "role": "assistant",
+                "content": [],
+            },
+        },
+    )
+    state.handle_event(added)
+
+    done = construct_type_unchecked(
+        type_=ResponseTextDoneEvent,
+        value={
+            "type": "response.output_text.done",
+            "sequence_number": 2,
+            "output_index": 0,
+            "content_index": 2,
+            "item_id": "msg_123",
+            "text": "Completed answer",
+            "logprobs": [],
+        },
+    )
+    events = state.handle_event(done)
+    assert len(events) == 1
+    assert events[0].type == "response.output_text.done"
+    assert events[0].text == "Completed answer"
+    assert events[0].content_index == 2
+
+
+def test_stream_state_handles_function_call_delta() -> None:
+    state: ResponseStreamState[object] = ResponseStreamState(text_format=omit, input_tools=[])
+
+    created = construct_type_unchecked(
+        type_=ResponseCreatedEvent,
+        value={
+            "type": "response.created",
+            "sequence_number": 0,
+            "response": {
+                "id": "resp_123",
+                "object": "response",
+                "created_at": 0,
+                "status": "in_progress",
+                "background": False,
+                "error": None,
+                "incomplete_details": None,
+                "instructions": None,
+                "max_output_tokens": None,
+                "max_tool_calls": None,
+                "model": "gpt-5-nano",
+                "output": [],
+                "parallel_tool_calls": True,
+                "previous_response_id": None,
+                "prompt_cache_key": None,
+                "reasoning": {"effort": None, "summary": None},
+                "safety_identifier": None,
+                "service_tier": "default",
+                "store": True,
+                "temperature": 1.0,
+                "text": {"format": {"type": "text"}, "verbosity": "medium"},
+                "tool_choice": "auto",
+                "tools": [],
+                "top_logprobs": 0,
+                "top_p": 1.0,
+                "truncation": "disabled",
+                "usage": None,
+                "user": None,
+                "metadata": {},
+            },
+        },
+    )
+    state.handle_event(created)
+
+    added = construct_type_unchecked(
+        type_=ResponseOutputItemAddedEvent,
+        value={
+            "type": "response.output_item.added",
+            "sequence_number": 1,
+            "output_index": 1,
+            "item": {
+                "id": "fc_resumed",
+                "type": "function_call",
+                "call_id": "call_1",
+                "name": "lookup",
+                "status": "in_progress",
+                "arguments": "",
+            },
+        },
+    )
+    state.handle_event(added)
+
+    fc_delta = construct_type_unchecked(
+        type_=ResponseFunctionCallArgumentsDeltaEvent,
+        value={
+            "type": "response.function_call_arguments.delta",
+            "sequence_number": 2,
+            "output_index": 1,
+            "item_id": "fc_resumed",
+            "delta": '{"query": "test"}',
+        },
+    )
+    events = state.handle_event(fc_delta)
+    assert len(events) == 1
+    assert events[0].type == "response.function_call_arguments.delta"
+    assert events[0].snapshot == '{"query": "test"}'
